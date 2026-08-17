@@ -101,11 +101,31 @@ def _get_device():
         return hoomd.device.CPU()
 
 
+def _available_devices():
+    """Every device the host can actually build, as (id, factory) pairs.
+
+    Tests parameterized over this run once per device, so a CPU/GPU divergence in
+    the bonding kernels fails the suite on any host that has both.
+    """
+    devices = [("cpu", hoomd.device.CPU)]
+    try:
+        hoomd.device.GPU()
+    except Exception:
+        return devices
+    return devices + [("gpu", hoomd.device.GPU)]
+
+
 def _make_sim(positions, typeids, types, bond_types, box_L, kT=0.1, seed=1,
-              sorter_period=None, frozen=False):
+              sorter_period=None, frozen=False, static_bonds=None, device=None):
     """Build a Simulation. If ``frozen`` is True no integration method is added,
     so particles never move -- useful for holding an exact contact geometry while
-    only the dynamic-bond kinetics evolve."""
+    only the dynamic-bond kinetics evolve.
+
+    ``static_bonds`` is a list of ``(bond_typeid, (tag_i, tag_j))`` placed in the
+    initial snapshot. The updater traces these at startup to assign molecule tags,
+    so they are what makes two reactive sites belong to the same molecule.
+    ``device`` overrides the autodetected device.
+    """
     n = len(positions)
     snap = hoomd.Snapshot()
     snap.particles.N = n
@@ -121,8 +141,13 @@ def _make_sim(positions, typeids, types, bond_types, box_L, kT=0.1, seed=1,
         snap.particles.mass[:] = 1.0
     snap.configuration.box = [box_L, box_L, box_L, 0, 0, 0]
     snap.bonds.types = list(bond_types)
+    if static_bonds:
+        snap.bonds.N = len(static_bonds)
+        snap.bonds.typeid[:] = np.asarray([bt for bt, _ in static_bonds], dtype=int)
+        snap.bonds.group[:] = np.asarray([pair for _, pair in static_bonds], dtype=int)
 
-    sim = hoomd.Simulation(device=_get_device(), seed=seed)
+    sim = hoomd.Simulation(device=_get_device() if device is None else device(),
+                           seed=seed)
     sim.create_state_from_snapshot(snap)
 
     sim.operations.tuners.clear()
@@ -601,3 +626,78 @@ def test_bond_resolution_typename_and_typeid():
     
     # After simulation attachment, the name is resolved to the string typename
     assert spec2.name == 'P-P'
+
+
+# --------------------------------------------------------------------------
+# Self-avoidance: same-molecule exclusion must be governed by the flag, and
+# must be governed identically on every device.
+# --------------------------------------------------------------------------
+
+def _self_avoidance_sim(device, self_avoiding, seed=23):
+    """Two reactive R sites tethered into one molecule, plus a free R pair.
+
+    Layout (all distances 1.0, so every candidate sits at the bond rest length):
+
+        R0 --static-- L2 --static-- R1        <- one molecule, R0/R1 in range
+        R3           R4                       <- two singleton molecules
+
+    R0 and R1 are 1.0 apart and are therefore eligible partners on distance
+    grounds alone; only the molecule test can keep them apart. R3-R4 is the
+    control and must bond regardless. Returns (n_intra, n_inter).
+    """
+    s3 = np.sqrt(3.0) / 2.0
+    pos = np.array([
+        [0.0, 0.0, 0.0],    # 0  R, molecule A
+        [1.0, 0.0, 0.0],    # 1  R, molecule A
+        [0.5, s3, 0.0],     # 2  L, molecule A (tether hub)
+        [5.0, 0.0, 0.0],    # 3  R, singleton
+        [6.0, 0.0, 0.0],    # 4  R, singleton
+    ])
+    typeids = [0, 0, 1, 0, 0]
+    sim, cell, thermo, n, dt = _make_sim(
+        pos, typeids, ["R", "L"], ["R-R", "tether"], 24.0,
+        seed=seed, frozen=True, device=device,
+        static_bonds=[(1, (0, 2)), (1, (2, 1))])
+
+    cs = 1
+    bonder = DyBond(hoomd.trigger.Periodic(cs), cell, thermo)
+    bonder.set_params(bond_type="R-R", A="R", B="R", nondybonds=0, r0=1.0,
+                      rmin=0.8, rmax=1.3, kspring=200.0, flag_temperature=0,
+                      flag_force=0, flag_metropolis=0, Tmelt=1.6, alpha=200.0,
+                      kon_init=40.0, kon_melt=0.0, koff_init=0.0, koff_melt=0.0,
+                      checksteps=cs, dt=dt,
+                      particle_clusterids=" ".join(str(i) for i in range(n)),
+                      self_avoiding=int(self_avoiding), userseed=7)
+    sim.operations.updaters.append(bonder)
+    sim.run(400)
+
+    snap = sim.state.get_snapshot()
+    groups = np.asarray(snap.bonds.group)
+    typeid = np.asarray(snap.bonds.typeid)
+    dyn = {frozenset(map(int, g)) for g, t in zip(groups, typeid) if t == 0}
+    n_intra = int(frozenset((0, 1)) in dyn)
+    n_inter = int(frozenset((3, 4)) in dyn)
+    return n_intra, n_inter
+
+
+@pytest.mark.parametrize("device_id,device", _available_devices())
+def test_self_avoidance_blocks_intramolecular_bond(device_id, device):
+    """With the flag set, two sites on one molecule must never bond."""
+    n_intra, n_inter = _self_avoidance_sim(device, self_avoiding=True)
+    assert n_inter == 1, f"[{device_id}] control pair 3-4 failed to bond"
+    assert n_intra == 0, (
+        f"[{device_id}] sites 0 and 1 share a molecule and bonded anyway")
+
+
+@pytest.mark.parametrize("device_id,device", _available_devices())
+def test_self_avoidance_off_permits_intramolecular_bond(device_id, device):
+    """Without the flag, the same two sites are allowed to bond.
+
+    This is the half that the CPU path used to get wrong: it applied the
+    molecule test unconditionally, so intramolecular bonding was impossible on
+    CPU no matter how the flag was set, while GPU honored it.
+    """
+    n_intra, n_inter = _self_avoidance_sim(device, self_avoiding=False)
+    assert n_inter == 1, f"[{device_id}] control pair 3-4 failed to bond"
+    assert n_intra == 1, (
+        f"[{device_id}] self_avoiding=False but sites 0 and 1 never bonded")

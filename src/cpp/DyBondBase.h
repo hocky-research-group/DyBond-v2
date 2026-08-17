@@ -104,7 +104,11 @@ class DyBondBase
     bool m_flag_force = false;
     Scalar m_force_a;
 
-    bool m_flag_self_avoiding = false;
+    /// Exclude partners on the same molecule, where molecules are traced from
+    /// the static bond topology at startup. Defaults on: a building block
+    /// bonding to itself is the exception, not the rule. Honored identically by
+    /// the CPU and GPU candidate searches.
+    bool m_flag_self_avoiding = true;
     bool m_flag_nearest_neighbor = true;
     Scalar m_r0 = 1.0;
 
