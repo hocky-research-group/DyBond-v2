@@ -11,7 +11,7 @@ __all__ = ['DyBond', 'DyBondUpdater']
 
 class DyBond(metaclass = Loggable):
     def __init__(self,name,bond,kon,koff,rmin,rmax,nameA=None,nameB=None,
-                 metropolisFlag = True,forceFlag = False,selfAvoidFlag = False,
+                 metropolisFlag = True,forceFlag = False,selfAvoidFlag = True,
                  r0 = 1.0):
         self.name = name
         self.bond = bond
@@ -52,7 +52,7 @@ class DyBond(metaclass = Loggable):
         self.kon_melt = kon_melt
         self.koff_melt = koff_melt
     def setSelfAvoidingFlag(self,flag):
-        self.selfAvoidingFlag = flag
+        self.selfAvoidFlag = flag
     def setMetropolisFlag(self,flag):
         self.metropolisFlag = flag
 
@@ -149,7 +149,7 @@ class DyBondUpdater(operation.Updater):
             r0 = value.get('r0', 1.0)
             metropolisFlag = value.get('metropolisFlag', True)
             forceFlag = 'force_a' in value
-            selfAvoidFlag = value.get('selfAvoidFlag', False)
+            selfAvoidFlag = value.get('selfAvoidFlag', True)
             bond_name = value.get('bond_typename')
             if bond_name is None:
                 bond_typeid = value.get('bond_typeid')

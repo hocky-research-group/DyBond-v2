@@ -10,6 +10,7 @@ Dynamic Bonding plugin for **HOOMD-blue v7**. This repository contains updates t
 
 ### Key Features
 - **Dynamic Bond Formation & Cleavage**: Define bond-forming and bond-breaking rates ($k_{\text{on}}$, $k_{\text{off}}$) and range limitations ($r_{\text{min}}$, $r_{\text{max}}$).
+- **Self-Avoidance**: `selfAvoidFlag` (default `True`) excludes candidate partners belonging to the same molecule, where molecules are traced from the *static* bond topology when the updater is configured. Set it to `False` to permit intramolecular bonding, which is how loop defects form in a network of multi-arm building blocks. The flag is honored identically by the CPU and GPU candidate searches.
 - **HOOMD-blue 7 Compatibility**: Full compatibility with the `hoomd.Simulation` workflow, triggers, and operations API.
 - **GPU Acceleration**: Native GPU-accelerated bonding checks and event compaction built using CUDA/HIP.
 

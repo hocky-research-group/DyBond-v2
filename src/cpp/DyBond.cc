@@ -186,7 +186,8 @@ void DyBond<bond_class>::findBondsToMake(std::vector<std::pair<idx, idx>>& toAdd
                     {
                     continue;
                     }
-                if (h_molTags.data[tagA] == h_molTags.data[tagB])
+                if (m_flag_self_avoiding
+                    && h_molTags.data[tagA] == h_molTags.data[tagB])
                     {
                     continue;
                     }
@@ -234,7 +235,8 @@ void DyBond<bond_class>::findBondsToMake(std::vector<std::pair<idx, idx>>& toAdd
                     {
                     continue;
                     }
-                if (h_molTags.data[tagA] == h_molTags.data[tagB])
+                if (m_flag_self_avoiding
+                    && h_molTags.data[tagA] == h_molTags.data[tagB])
                     {
                     continue;
                     }
