@@ -227,7 +227,7 @@ hipError_t gpu_try_breaks(const idx& numBonds,
 
 __device__ bool isMatch(idx typeA, idx typeB, idx* d_typeAs, idx* d_typeBs, idx num_pairs)
     {
-    if (typeA < typeB)
+    if (typeA > typeB)
         {
         idx temp = typeA;
         typeA = typeB;
@@ -235,7 +235,7 @@ __device__ bool isMatch(idx typeA, idx typeB, idx* d_typeAs, idx* d_typeBs, idx 
         }
     for (idx j = 0; j < num_pairs; j++)
         {
-        if (typeA == d_typeBs[j] && typeB == d_typeAs[j])
+        if (typeA == d_typeAs[j] && typeB == d_typeBs[j])
             return true;
         }
     return false;

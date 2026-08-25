@@ -59,6 +59,7 @@ void DyBondBase::addTypePair(idx typeA, idx typeB)
     m_particleType_pairs.insert(orderedPair(typeA, typeB));
     m_particleTypes.insert(typeA);
     m_particleTypes.insert(typeB);
+m_gpu_params_dirty = true;
     /// m_particle_types.push_back(orderedPair(typeA, typeB));
     }
 void DyBondBase::setTempParams(Scalar Tmelt, Scalar alpha, Scalar kon_melt, Scalar koff_melt)

@@ -140,18 +140,22 @@ void DyBond<bond_class>::findBondsToMake(std::vector<std::pair<idx, idx>>& toAdd
     Scalar Pon = kon * m_dt * m_period;
 
     // Shuffle the particles list using HOOMD's RandomGenerator (Philox) to prevent tag/ordering bias
+    if (m_dybondParticleTags.size() == 0) return;
     std::vector<idx> shuffled_particles(m_dybondParticleTags.size());
     for (idx i = 0; i < m_dybondParticleTags.size(); i++)
         {
         shuffled_particles[i] = h_dybondParticleTags.data[i];
         }
-    RandomGenerator rng_shuffle(Seed(BONDING_RNG_IDENTIFIER + m_instance_number, timestep, m_seed), Counter(0xffffffff));
-    UniformDistribution<Scalar> uniform_shuffle(0, 1);
-    for (idx i = shuffled_particles.size() - 1; i > 0; --i)
+    if (shuffled_particles.size() > 1)
         {
-        idx j = (idx)(uniform_shuffle(rng_shuffle) * (i + 1));
-        if (j > i) j = i;
-        std::swap(shuffled_particles[i], shuffled_particles[j]);
+        RandomGenerator rng_shuffle(Seed(BONDING_RNG_IDENTIFIER + m_instance_number, timestep, m_seed), Counter(0xffffffff));
+        UniformDistribution<Scalar> uniform_shuffle(0, 1);
+        for (size_t i = shuffled_particles.size() - 1; i > 0; --i)
+            {
+            idx j = (idx)(uniform_shuffle(rng_shuffle) * (i + 1));
+            if (j > i) j = i;
+            std::swap(shuffled_particles[i], shuffled_particles[j]);
+            }
         }
 
     idx N = pdata->getN();

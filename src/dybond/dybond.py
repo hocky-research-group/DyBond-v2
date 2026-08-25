@@ -15,8 +15,8 @@ class DyBond(metaclass = Loggable):
                  r0 = 1.0):
         self.name = name
         self.bond = bond
-        self.kon, self.koff = kon, koff
-        self.rmin, self.rmax = rmin, rmax
+        self.kon, self.koff = float(kon), float(koff)
+        self.rmin, self.rmax = float(rmin), float(rmax)
         self.names = []
         if nameA is not None and nameB is not None:
             self[nameA,nameB]
@@ -87,7 +87,7 @@ class DyBond(metaclass = Loggable):
             cls = getattr(_dybond,"DyBond"+bond_class+"GPU")
         self._cpp_obj = cls(self._simulation.state._cpp_sys_def,
                             bond_type, self.dt, self.period, bond_params,
-                            self.kon, self.koff, self.rmin, self.rmax)
+                            float(self.kon), float(self.koff), float(self.rmin), float(self.rmax))
         self._cpp_obj.setMetropolisFlag(self.metropolisFlag)
         self._cpp_obj.setSelfAvoidingFlag(self.selfAvoidFlag)
         self._cpp_obj.setNearestNeighborFlag(self.nearestNeighbor)
@@ -142,10 +142,10 @@ class DyBondUpdater(operation.Updater):
             raise KeyError("Key must be a tuple of two particle types, e.g. ('A', 'B')")
         if isinstance(value, dict):
             bond = value.get('bond')
-            kon = value.get('kon', 1000.0)
+            kon = float(value.get('kon', 1000.0))
             koff = value.get('koff', 0.0)
-            rmin = value.get('rmin', 0.8)
-            rmax = value.get('rmax', 1.2)
+            rmin = float(value.get('rmin', 0.8))
+            rmax = float(value.get('rmax', 1.2))
             r0 = value.get('r0', 1.0)
             metropolisFlag = value.get('metropolisFlag', True)
             forceFlag = 'force_a' in value
