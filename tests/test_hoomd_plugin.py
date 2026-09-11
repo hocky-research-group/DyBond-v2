@@ -116,7 +116,8 @@ def _available_devices():
 
 
 def _make_sim(positions, typeids, types, bond_types, box_L, kT=0.1, seed=1,
-              sorter_period=None, frozen=False, static_bonds=None, device=None):
+              sorter_period=None, frozen=False, static_bonds=None, device=None,
+              bond_force=None):
     """Build a Simulation. If ``frozen`` is True no integration method is added,
     so particles never move -- useful for holding an exact contact geometry while
     only the dynamic-bond kinetics evolve.
@@ -124,7 +125,9 @@ def _make_sim(positions, typeids, types, bond_types, box_L, kT=0.1, seed=1,
     ``static_bonds`` is a list of ``(bond_typeid, (tag_i, tag_j))`` placed in the
     initial snapshot. The updater traces these at startup to assign molecule tags,
     so they are what makes two reactive sites belong to the same molecule.
-    ``device`` overrides the autodetected device.
+    ``device`` overrides the autodetected device. ``bond_force`` replaces the
+    default harmonic bond potential, so a test can drive DyBond with FENE or
+    Tether bonds instead; its params must already be set for every bond type.
     """
     n = len(positions)
     snap = hoomd.Snapshot()
@@ -163,10 +166,11 @@ def _make_sim(positions, typeids, types, bond_types, box_L, kT=0.1, seed=1,
         wca.params[(a, b)] = dict(epsilon=1.0, sigma=1.0)
         wca.r_cut[(a, b)] = 2.0 ** (1.0 / 6.0)
     integ.forces.append(wca)
-    harm = hoomd.md.bond.Harmonic()
-    for bt in bond_types:
-        harm.params[bt] = dict(k=200.0, r0=1.0)
-    integ.forces.append(harm)
+    if bond_force is None:
+        bond_force = hoomd.md.bond.Harmonic()
+        for bt in bond_types:
+            bond_force.params[bt] = dict(k=200.0, r0=1.0)
+    integ.forces.append(bond_force)
     integ.methods.append(
         hoomd.md.methods.Langevin(filter=hoomd.filter.All(), kT=kT))
     sim.operations.integrator = integ
@@ -701,3 +705,164 @@ def test_self_avoidance_off_permits_intramolecular_bond(device_id, device):
     assert n_inter == 1, f"[{device_id}] control pair 3-4 failed to bond"
     assert n_intra == 1, (
         f"[{device_id}] self_avoiding=False but sites 0 and 1 never bonded")
+
+
+# --------------------------------------------------------------------------
+# The Metropolis acceptance factor must use whichever bond potential the
+# integrator uses, not an assumed harmonic form. This is what generalizes the
+# scheme of Mitra et al. (Soft Matter 19, 4223, 2023), where only a harmonic
+# bond was supported.
+# --------------------------------------------------------------------------
+
+BOND_POTENTIALS = {
+    # name -> (factory, expected plugin class stem)
+    "harmonic": (lambda: _harmonic_force(k=20.0, r0=1.0), "DyBondHarmonic"),
+    "fene": (lambda: _fene_force(k=2.0, r0=2.0), "DyBondFENE"),
+    "tether": (lambda: _tether_force(), "DyBondTether"),
+}
+
+
+def _harmonic_force(k, r0, bond_types=("R-R",)):
+    f = hoomd.md.bond.Harmonic()
+    for bt in bond_types:
+        f.params[bt] = dict(k=k, r0=r0)
+    return f
+
+
+def _fene_force(k, r0, bond_types=("R-R",)):
+    # sigma is chosen so the WCA part is already cut off at the separations
+    # used below; the FENE stretching term then sets the whole bond energy.
+    f = hoomd.md.bond.FENEWCA()
+    for bt in bond_types:
+        f.params[bt] = dict(k=k, r0=r0, epsilon=1.0, sigma=0.9, delta=0.0)
+    return f
+
+
+def _tether_force(bond_types=("R-R",)):
+    f = hoomd.md.bond.Tether()
+    for bt in bond_types:
+        f.params[bt] = dict(k_b=10.0, l_min=0.7, l_c1=0.9, l_c0=1.2, l_max=1.4)
+    return f
+
+
+def _bond_energy(make_force, bond_type, separation, device):
+    """Energy HOOMD itself assigns to one bond of this type at ``separation``.
+
+    Measured rather than recomputed in the test, so the assertions below compare
+    DyBond's acceptance factor against the same evaluator the integrator uses
+    instead of against a formula reimplemented here.
+    """
+    snap = hoomd.Snapshot()
+    snap.particles.N = 2
+    snap.particles.types = ["R"]
+    snap.particles.position[:] = [[0.0, 0.0, 0.0], [separation, 0.0, 0.0]]
+    snap.configuration.box = [20.0, 20.0, 20.0, 0, 0, 0]
+    snap.bonds.types = [bond_type]
+    snap.bonds.N = 1
+    snap.bonds.typeid[:] = [0]
+    snap.bonds.group[:] = [[0, 1]]
+
+    sim = hoomd.Simulation(device=device(), seed=1)
+    sim.create_state_from_snapshot(snap)
+    force = make_force()
+    integ = hoomd.md.Integrator(dt=1e-6)
+    integ.forces.append(force)
+    sim.operations.integrator = integ
+    sim.run(0)
+    return float(force.energy)
+
+
+def _pair_lattice(separation, reps=4, spacing=5.0):
+    """``reps**3`` well-separated pairs, each held at ``separation``."""
+    pos = []
+    for i in range(reps):
+        for j in range(reps):
+            for k in range(reps):
+                base = np.array([i * spacing, j * spacing, k * spacing])
+                pos.append(base)
+                pos.append(base + np.array([separation, 0.0, 0.0]))
+    pos = np.array(pos)
+    pos -= pos.mean(axis=0)
+    return pos, reps ** 3, reps * spacing + 2.0 * spacing
+
+
+@pytest.mark.parametrize("device_id,device", _available_devices())
+@pytest.mark.parametrize("potential", ["harmonic", "fene"])
+def test_metropolis_uses_attached_bond_potential(device_id, device, potential):
+    """Bound fraction must follow the energy of the *attached* potential.
+
+    A pair frozen at fixed separation is a two-state Markov chain with per-sweep
+    probabilities p_on = k_on n dt exp(-U_b/kT) and p_off = k_off n dt, so its
+    stationary bound fraction is p_on / (p_on + p_off). Here k_off is chosen from
+    the independently measured U_b so that the correct answer is exactly 1/2. A
+    plugin that evaluated some other bond form would land elsewhere: for these
+    parameters the FENE bond costs ~1.4 kT more than the harmonic one at the same
+    separation, which moves the bound fraction to ~0.2 or ~0.8.
+    """
+    make_force, _ = BOND_POTENTIALS[potential]
+    sep, kT, cs = 1.25, 1.0, 1
+
+    u_bond = _bond_energy(make_force, "R-R", sep, device)
+    pos, n_pairs, box_L = _pair_lattice(sep)
+    force = make_force()
+    sim, cell, thermo, n, dt = _make_sim(
+        pos, [0] * len(pos), ["R"], ["R-R"], box_L, kT=kT, seed=11,
+        frozen=True, device=device, bond_force=force)
+
+    # The plugin uses the instantaneous kinetic temperature, so read it rather
+    # than assuming it equals the requested kT.
+    sim.run(0)
+    temp = (2.0 * thermo.translational_kinetic_energy
+            / thermo.translational_degrees_of_freedom)
+
+    kon = 300.0
+    koff = kon * np.exp(-u_bond / temp)     # -> ideal bound fraction of 1/2
+    assert koff * cs * dt < 1.0, "off-probability must stay below one"
+
+    updater = GPU_DyBondUpdater(hoomd.trigger.Periodic(cs), cell, thermo)
+    updater["R", "R"] = dict(bond=force, bond_typename="R-R",
+                             kon=kon, koff=koff,
+                             rmin=0.8, rmax=1.3, r0=1.0,
+                             metropolisFlag=True, selfAvoidFlag=True)
+    spec = updater["R", "R"]
+    sim.operations.updaters.append(updater)
+
+    sim.run(3000)                                   # burn in
+    samples = []
+    for _ in range(2000):
+        sim.run(5)
+        samples.append(spec.bonds)
+    measured = float(np.mean(samples)) / n_pairs
+
+    assert abs(measured - 0.5) < 0.04, (
+        f"[{device_id}/{potential}] bound fraction {measured:.3f} != 0.5 "
+        f"predicted from the measured bond energy U_b = {u_bond:.4f} "
+        f"at kT = {temp:.4f}")
+
+
+@pytest.mark.parametrize("device_id,device", _available_devices())
+@pytest.mark.parametrize("potential", sorted(BOND_POTENTIALS))
+def test_bond_potential_selects_matching_plugin_class(device_id, device, potential):
+    """Each supported bond form instantiates its own templated plugin class.
+
+    Guards the dispatch in DyBond._attach_hook, which derives the plugin class
+    from the HOOMD potential's _cpp_class_name: a renamed evaluator upstream
+    would otherwise fail silently or fall back to the wrong energy.
+    """
+    make_force, expected = BOND_POTENTIALS[potential]
+    pos, n_pairs, box_L = _pair_lattice(1.25, reps=2)
+    force = make_force()
+    sim, cell, thermo, n, dt = _make_sim(
+        pos, [0] * len(pos), ["R"], ["R-R"], box_L, kT=1.0, seed=5,
+        frozen=True, device=device, bond_force=force)
+
+    updater = GPU_DyBondUpdater(hoomd.trigger.Periodic(1), cell, thermo)
+    updater["R", "R"] = dict(bond=force,
+                             bond_typename="R-R", kon=300.0, koff=10.0,
+                             rmin=0.8, rmax=1.3, r0=1.0)
+    spec = updater["R", "R"]
+    sim.operations.updaters.append(updater)
+    sim.run(1)
+
+    suffix = "GPU" if device_id == "gpu" else ""
+    assert type(spec._cpp_obj).__name__ == expected + suffix
