@@ -10,21 +10,64 @@ from hoomd.logging import log, Loggable, modify_namespace;
 __all__ = ['DyBond', 'DyBondUpdater']
 
 class DyBond(metaclass = Loggable):
-    def __init__(self,name,bond,kon,koff,rmin,rmax,nameA=None,nameB=None,
-                 metropolisFlag = True,forceFlag = False,selfAvoidFlag = True,
-                 r0 = 1.0):
+    def __init__(self,name,bond,kon,koff,rmin,rmax,nameA,nameB,selfAvoidFlag,
+                 metropolisFlag = True,forceFlag = False):
         self.name = name
         self.bond = bond
         self.kon, self.koff = float(kon), float(koff)
         self.rmin, self.rmax = float(rmin), float(rmax)
         self.names = []
-        if nameA is not None and nameB is not None:
-            self[nameA,nameB]
+        self[nameA,nameB]
+        self.selfAvoidFlag = bool(selfAvoidFlag)
         self.metropolisFlag = metropolisFlag
         self.forceFlag = forceFlag
         self.temperatureFlag = False
-        self.selfAvoidFlag = selfAvoidFlag
-        self.r0 = r0
+        self.r0 = self.get_r0()
+
+    def get_r0(self):
+        """Determine equilibrium/target distance r0 from the HOOMD bond object.
+
+        Extracts 'r0' directly for Harmonic / FENE bonds, or the average of
+        l_c1 and l_c0 for Tether bonds. Raises ValueError if r0 cannot be resolved.
+        """
+        params = None
+        bond_name = self.name
+        if hasattr(self, '_simulation') and self._simulation is not None and isinstance(bond_name, int):
+            bond_name = self._simulation.state.bond_types[bond_name]
+
+        if hasattr(self.bond, 'params'):
+            try:
+                params = self.bond.params[bond_name]
+            except (KeyError, IndexError, TypeError):
+                if isinstance(bond_name, int) and hasattr(self.bond.params, 'keys'):
+                    keys = list(self.bond.params.keys())
+                    if 0 <= bond_name < len(keys):
+                        params = self.bond.params[keys[bond_name]]
+                elif hasattr(self.bond.params, 'keys') and len(self.bond.params.keys()) == 1:
+                    params = self.bond.params[list(self.bond.params.keys())[0]]
+
+        if params is None and hasattr(self.bond, '_cpp_obj') and hasattr(self.bond._cpp_obj, 'getParams'):
+            try:
+                cpp_params = self.bond._cpp_obj.getParams(bond_name)
+                if hasattr(cpp_params, 'asDict'):
+                    params = cpp_params.asDict()
+                elif hasattr(cpp_params, 'r_0'):
+                    return float(cpp_params.r_0)
+                elif hasattr(cpp_params, 'l_c0') and hasattr(cpp_params, 'l_c1'):
+                    return 0.5 * float(cpp_params.l_c1 + cpp_params.l_c0)
+            except Exception:
+                params = None
+
+        if params is not None:
+            if 'r0' in params:
+                return float(params['r0'])
+            if 'l_c0' in params and 'l_c1' in params:
+                return 0.5 * float(params['l_c1'] + params['l_c0'])
+
+        raise ValueError(
+            f"Cannot determine r0 for bond type '{bond_name}' from bond object {self.bond}. "
+            "Bond parameters must specify 'r0' (e.g. Harmonic, FENEWCA) or 'l_c0' and 'l_c1' (Tether)."
+        )
 
     def add_particles(self, A, B):
         A = str(A) if isinstance(A,int) else A
@@ -141,16 +184,11 @@ class DyBondUpdater(operation.Updater):
         if not isinstance(key, tuple) or len(key) != 2:
             raise KeyError("Key must be a tuple of two particle types, e.g. ('A', 'B')")
         if isinstance(value, dict):
-            bond = value.get('bond')
-            kon = float(value.get('kon', 1000.0))
-            koff = value.get('koff', 0.0)
-            rmin = float(value.get('rmin', 0.8))
-            rmax = float(value.get('rmax', 1.2))
-            r0 = value.get('r0', 1.0)
-            metropolisFlag = value.get('metropolisFlag', True)
-            forceFlag = 'force_a' in value
-            selfAvoidFlag = value.get('selfAvoidFlag', True)
-            bond_name = value.get('bond_typename')
+            required = ['bond', 'kon', 'koff', 'rmin', 'rmax']
+            missing = [k for k in required if k not in value]
+            if 'selfAvoidFlag' not in value and 'selfAvoidingFlag' not in value:
+                missing.append('selfAvoidFlag')
+            bond_name = value.get('bond_typename', value.get('name'))
             if bond_name is None:
                 bond_typeid = value.get('bond_typeid')
                 if bond_typeid is not None:
@@ -159,12 +197,22 @@ class DyBondUpdater(operation.Updater):
                     else:
                         bond_name = int(bond_typeid)
             if bond_name is None:
-                bond_name = f"{key[0]}-{key[1]}"
+                missing.append('bond_typename')
+            if missing:
+                raise KeyError(f"Missing required parameter(s) for dynamic bond: {', '.join(missing)}")
+            bond = value['bond']
+            kon = float(value['kon'])
+            koff = float(value['koff'])
+            rmin = float(value['rmin'])
+            rmax = float(value['rmax'])
+            metropolisFlag = value.get('metropolisFlag', True)
+            forceFlag = 'force_a' in value
+            selfAvoidFlag = bool(value['selfAvoidFlag'] if 'selfAvoidFlag' in value else value['selfAvoidingFlag'])
             spec = DyBond(
                 name=bond_name, bond=bond, kon=kon, koff=koff,
                 rmin=rmin, rmax=rmax, nameA=key[0], nameB=key[1],
-                metropolisFlag=metropolisFlag, forceFlag=forceFlag,
-                selfAvoidFlag=selfAvoidFlag, r0=r0
+                selfAvoidFlag=selfAvoidFlag,
+                metropolisFlag=metropolisFlag, forceFlag=forceFlag
             )
             if 'force_a' in value:
                 spec.setForceParams(value['force_a'])
@@ -205,5 +253,11 @@ class DyBondUpdater(operation.Updater):
             bond._attach(self._simulation)
             self._cpp_obj.addDyBond(bond._cpp_obj)
             for (typeA, typeB) in bond.names:
-                self.nlist.r_cut[typeA, typeB] = bond.rmax
+                try:
+                    current_rcut = self.nlist.r_cut.get((typeA, typeB), 0.0)
+                    if current_rcut is None or current_rcut is False:
+                        current_rcut = 0.0
+                except Exception:
+                    current_rcut = 0.0
+                self.nlist.r_cut[typeA, typeB] = max(float(current_rcut), float(bond.rmax))
         self._cpp_obj.configure()

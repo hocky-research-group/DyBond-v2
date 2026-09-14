@@ -10,7 +10,7 @@ Dynamic Bonding plugin for **HOOMD-blue v7**. This repository contains updates t
 
 ### Key Features
 - **Dynamic Bond Formation & Cleavage**: Define bond-forming and bond-breaking rates ($k_{\text{on}}$, $k_{\text{off}}$) and range limitations ($r_{\text{min}}$, $r_{\text{max}}$).
-- **Self-Avoidance**: `selfAvoidFlag` (default `True`) excludes candidate partners belonging to the same molecule, where molecules are traced from the *static* bond topology when the updater is configured. Set it to `False` to permit intramolecular bonding, which is how loop defects form in a network of multi-arm building blocks. The flag is honored identically by the CPU and GPU candidate searches.
+- **Self-Avoidance**: `selfAvoidFlag` (required boolean parameter) specifies whether to exclude candidate partners belonging to the same molecule, where molecules are traced from the *static* bond topology when the updater is configured. Set it to `False` to permit intramolecular bonding, which is how loop defects form in a network of multi-arm building blocks, or `True` to enforce intermolecular-only bonding. The flag is honored identically by the CPU and GPU candidate searches.
 - **HOOMD-blue 7 Compatibility**: Full compatibility with the `hoomd.Simulation` workflow, triggers, and operations API.
 - **GPU Acceleration**: Native GPU-accelerated bonding checks and event compaction built using CUDA/HIP.
 
@@ -84,9 +84,11 @@ dybond_pot = DyBond(
     kon=100.0, 
     koff=2.06e-7, 
     rmin=0.8, 
-    rmax=1.2
+    rmax=1.2,
+    nameA="patch_A",
+    nameB="patch_B",
+    selfAvoidFlag=True
 )
-dybond_pot[('patch_A', 'patch_B')]  # Define particle type pairs for bonding
 
 # 5. Add DyBondUpdater to simulation
 # The updater checks for bond formation and cleavage at regular periods

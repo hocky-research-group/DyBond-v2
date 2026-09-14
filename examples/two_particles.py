@@ -50,8 +50,8 @@ AB_dybond = dyb_gpu.DyBond(
     rmax=1.3,            # Maximum binding distance
     nameA="A",
     nameB="B",
-    metropolisFlag=True, # Enable energy penalty factor
-    r0=1.0
+    selfAvoidFlag=True,
+    metropolisFlag=True # Enable energy penalty factor
 )
 
 # 5. Create DyBondUpdater and append the spec

@@ -72,8 +72,7 @@ class DyBond(hoomd.operation.Updater):
                 nameB=p['B'],
                 metropolisFlag=bool(p['flag_metropolis']),
                 forceFlag=bool(p['flag_force']),
-                selfAvoidFlag=bool(p['self_avoiding']),
-                r0=p['r0']
+                selfAvoidFlag=bool(p['self_avoiding'])
             )
             if p['flag_force']:
                 spec.setForceParams(p['flag_force'])
@@ -603,6 +602,9 @@ def test_bond_resolution_typename_and_typeid():
         'bond_typename': 'P-P',
         'kon': 10.0,
         'koff': 0.1,
+        'rmin': 0.8,
+        'rmax': 1.2,
+        'selfAvoidFlag': True,
     }
     spec1 = updater1[('P', 'P')]
     assert spec1.name == 'P-P'
@@ -614,6 +616,9 @@ def test_bond_resolution_typename_and_typeid():
         'bond_typeid': 0,
         'kon': 10.0,
         'koff': 0.1,
+        'rmin': 0.8,
+        'rmax': 1.2,
+        'selfAvoidFlag': True,
     }
     spec2 = updater2[('P', 'P')]
     
@@ -701,3 +706,73 @@ def test_self_avoidance_off_permits_intramolecular_bond(device_id, device):
     assert n_inter == 1, f"[{device_id}] control pair 3-4 failed to bond"
     assert n_intra == 1, (
         f"[{device_id}] self_avoiding=False but sites 0 and 1 never bonded")
+
+
+def test_dybond_missing_self_avoid_flag_raises():
+    """Verify that DyBond.__init__ raises TypeError when selfAvoidFlag is omitted."""
+    harm = hoomd.md.bond.Harmonic()
+    harm.params["A-B"] = dict(k=200.0, r0=1.0)
+    with pytest.raises(TypeError, match=r"missing 1 required positional argument: 'selfAvoidFlag'"):
+        GPU_DyBond(
+            name="A-B",
+            bond=harm,
+            kon=10.0,
+            koff=0.1,
+            rmin=0.8,
+            rmax=1.2,
+            nameA="A",
+            nameB="B"
+        )
+
+
+def test_updater_setitem_missing_self_avoid_flag_raises():
+    """Verify that DyBondUpdater.__setitem__ raises KeyError when selfAvoidFlag is missing in dict."""
+    pos = np.array([[0, 0, 0], [1.0, 0, 0]], float)
+    sim, cell, thermo, _, dt = _make_sim(pos, [0, 0], ["P"], ["P-P"], 20.0, frozen=True)
+    harm = hoomd.md.bond.Harmonic()
+    harm.params["P-P"] = dict(k=200.0, r0=1.0)
+    sim.operations.integrator.forces.append(harm)
+
+    updater = GPU_DyBondUpdater(hoomd.trigger.Periodic(1), cell, thermo)
+    with pytest.raises(KeyError, match=r"Missing required parameter\(s\) for dynamic bond: selfAvoidFlag"):
+        updater[('P', 'P')] = {
+            'bond': harm,
+            'bond_typename': 'P-P',
+            'kon': 10.0,
+            'koff': 0.1,
+            'rmin': 0.8,
+            'rmax': 1.2,
+        }
+
+
+def test_updater_setitem_accepts_self_avoid_flag():
+    """Verify that DyBondUpdater.__setitem__ properly parses selfAvoidFlag and selfAvoidingFlag."""
+    pos = np.array([[0, 0, 0], [1.0, 0, 0]], float)
+    sim, cell, thermo, _, dt = _make_sim(pos, [0, 0], ["P"], ["P-P"], 20.0, frozen=True)
+    harm = hoomd.md.bond.Harmonic()
+    harm.params["P-P"] = dict(k=200.0, r0=1.0)
+    sim.operations.integrator.forces.append(harm)
+
+    updater = GPU_DyBondUpdater(hoomd.trigger.Periodic(1), cell, thermo)
+    updater[('P', 'P')] = {
+        'bond': harm,
+        'bond_typename': 'P-P',
+        'kon': 10.0,
+        'koff': 0.1,
+        'rmin': 0.8,
+        'rmax': 1.2,
+        'selfAvoidFlag': False,
+    }
+    assert updater[('P', 'P')].selfAvoidFlag is False
+
+    updater[('P', 'P')] = {
+        'bond': harm,
+        'bond_typename': 'P-P',
+        'kon': 10.0,
+        'koff': 0.1,
+        'rmin': 0.8,
+        'rmax': 1.2,
+        'selfAvoidingFlag': True,
+    }
+    assert updater[('P', 'P')].selfAvoidFlag is True
+
