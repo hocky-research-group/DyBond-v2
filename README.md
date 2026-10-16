@@ -138,6 +138,10 @@ DyBond/
   `DyBondBase` gained `setDt(dt)` (marks the GPU parameters dirty) and `DyBondUpdater` (C++)
   `setDtCallback(callable)`; Python installs a callback returning the active integrator's
   `dt`, called every sweep in every mode, so the probabilities `kon dt period` and
-  `koff dt period` follow a `dt` change or an integrator replacement after attach. Motivation: the kinetic
+  `koff dt period` follow a `dt` change or an integrator replacement after attach.
+  `DyBondUpdater._attach_hook` checks the integrator and, with the flag on, the thermostat
+  before building any C++ object, raising a `ValueError` that is also a HOOMD
+  `SimulationDefinitionError`, so HOOMD undoes the attach and a corrected simulation re-attaches
+  on the next `run`. Motivation: the kinetic
   temperature of a few-thousand-particle system fluctuates by ~1 % (sqrt(2/(3N))), which a steep
   switch turns into large rate fluctuations shared by every bond.

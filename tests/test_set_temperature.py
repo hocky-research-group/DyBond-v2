@@ -287,3 +287,32 @@ def test_rates_follow_integrator_dt_after_attach(device, use_set_temperature, ho
         sim.operations.integrator.dt = DT_LONG
     sim.run(1)
     assert _num_bonds(sim) == int(not bonded)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("missing", ["thermostat", "integrator"])
+def test_failed_attach_can_be_fixed_and_rerun(device, missing):
+    """A configuration error at attach leaves nothing attached: fixing it and rerunning works.
+
+    HOOMD treats an operation whose C++ object exists as attached and does not rerun its attach
+    hook, so the checks must raise before any C++ object is built. Missing thermostat: flag on
+    with no Langevin method. Missing integrator: no integrator at all. After the fix, binding is
+    certain (cold set kT, or kon dt period = 1).
+    """
+    n_methods = 0 if missing == "thermostat" else 1
+    sim, _, nlist, thermo, harm = _hot_pair_sim(device, set_kT=T_COLD, n_methods=n_methods)
+    integ = sim.operations.integrator
+    if missing == "thermostat":
+        upd = _updater(nlist, thermo, harm, use_set_temperature=True)
+    else:
+        sim.operations.integrator = None
+        upd = _rate_updater(nlist, thermo, harm, kon=1.0 / DT, koff=0.0)
+    sim.operations.updaters.append(upd)
+    with pytest.raises(ValueError):
+        sim.run(1)
+    if missing == "thermostat":
+        integ.methods.append(hoomd.md.methods.Langevin(filter=hoomd.filter.All(), kT=T_COLD))
+    else:
+        sim.operations.integrator = integ
+    sim.run(3)
+    assert _num_bonds(sim) == 1

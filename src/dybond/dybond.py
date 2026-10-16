@@ -10,6 +10,14 @@ import weakref
 
 __all__ = ['DyBond', 'DyBondUpdater']
 
+
+class _AttachError(hoomd.error.SimulationDefinitionError, ValueError):
+    """Configuration error at attach: a ValueError that HOOMD's _attach rolls back.
+
+    HOOMD undoes an operation's attach bookkeeping only for SimulationDefinitionError, so a
+    corrected simulation can attach the updater again on the next run.
+    """
+
 class DyBond(metaclass = Loggable):
     def __init__(self,name,bond,kon,koff,rmin,rmax,nameA,nameB,selfAvoidFlag,
                  metropolisFlag = True,forceFlag = False):
@@ -321,6 +329,14 @@ class DyBondUpdater(operation.Updater):
             self.specs[(a, b)] = spec
 
     def _attach_hook(self):
+        # validate before any C++ object or dependency attaches: HOOMD treats an operation with
+        # a C++ object as attached and does not rerun this hook
+        try:
+            dt = self._integrator_dt()
+            if self._use_set_temperature:
+                self._set_temperature(self._simulation.timestep)
+        except ValueError as err:
+            raise _AttachError(str(err)) from err
         # initialize the reflected c++ class
         self.nlist._attach(self._simulation)
         self.thermo._attach(self._simulation)
@@ -336,7 +352,6 @@ class DyBondUpdater(operation.Updater):
                                                 self.trigger,
                                                 self.nlist._cpp_obj, 
                                                 self.thermo._cpp_obj);
-        dt = self._integrator_dt()
         for bond in self.dybonds:
             bond._set_time(period = self.period,dt = dt,nearestNeighbor=self.nearestNeighbor)
             bond._attach(self._simulation)
