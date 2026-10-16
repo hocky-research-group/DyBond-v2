@@ -11,6 +11,7 @@ Dynamic Bonding plugin for **HOOMD-blue v7**. This repository contains updates t
 ### Key Features
 - **Dynamic Bond Formation & Cleavage**: Define bond-forming and bond-breaking rates ($k_{\text{on}}$, $k_{\text{off}}$) and range limitations ($r_{\text{min}}$, $r_{\text{max}}$).
 - **Self-Avoidance**: `selfAvoidFlag` (required boolean parameter) specifies whether to exclude candidate partners belonging to the same molecule, where molecules are traced from the *static* bond topology when the updater is configured. Set it to `False` to permit intramolecular bonding, which is how loop defects form in a network of multi-arm building blocks, or `True` to enforce intermolecular-only bonding. The flag is honored identically by the CPU and GPU candidate searches.
+- **Temperature Source**: `DyBondUpdater(..., use_set_temperature=False)`. By default the temperature switch and the Metropolis factor use the instantaneous translational kinetic temperature from the `thermo` compute. With `use_set_temperature=True` they use the `kT` of the integrator's single Langevin or Brownian method, looked up at every sweep (one Python call per sweep), so assigning `method.kT` (a new value or Variant), replacing the method, or replacing `sim.operations.integrator` takes effect at the next sweep; leaving no such method raises `ValueError`, as does an integrator `dt` different from the one at attach (the rate probabilities are built with the attach-time `dt`).
 - **HOOMD-blue 7 Compatibility**: Full compatibility with the `hoomd.Simulation` workflow, triggers, and operations API.
 - **GPU Acceleration**: Native GPU-accelerated bonding checks and event compaction built using CUDA/HIP.
 
@@ -119,3 +120,21 @@ DyBond/
 ├── LICENSE               # MIT License
 └── README.md             # This file
 ```
+
+---
+
+## Modifications
+
+- derivative-contributor: G. Hocky (with Claude), 2026-10-15, developed as `feature/set-temperature` from 09aef76 and carried onto main af24ffc —
+  added an opt-in temperature source for the rate switch and Metropolis factor.
+  `DyBondUpdater` (C++) gained `setTemperatureCallback(callable)`; when set, each sweep calls
+  it with the timestep (GIL acquired) and passes the bonding code a
+  one-element properties array whose kinetic-energy entry is `kT * translational_dof / 2`, so
+  the unchanged CPU functions and GPU kernels (which compute `2 properties[0] / dof`) see the set
+  temperature. Python `DyBondUpdater` gained `use_set_temperature` (default `False`; settable
+  after attach, validated before it changes anything); its callback (held through a weak
+  reference) evaluates the kT of the active `sim.operations.integrator`'s single
+  Langevin/Brownian method, raising `ValueError` for any other count or when the integrator
+  `dt` differs from the attach-time `dt` used in the rate probabilities. Tests in `tests/test_set_temperature.py`. Motivation: the kinetic
+  temperature of a few-thousand-particle system fluctuates by ~1 % (sqrt(2/(3N))), which a steep
+  switch turns into large rate fluctuations shared by every bond.

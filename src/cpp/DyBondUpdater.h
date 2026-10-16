@@ -51,11 +51,16 @@ class DyBondUpdater : public Updater
     void update(uint64_t timestep);
     void addDyBond(std::shared_ptr<DyBondBase> dybond);
     void configure();
+    //! Evaluate rates at callback(timestep), called every sweep; None = kinetic temperature
+    void setTemperatureCallback(pybind11::object callback);
     //! Returns a list of log quantities this compute calculates
 
     private:
     std::shared_ptr<md::NeighborList> m_nlist;
     std::shared_ptr<md::ComputeThermo> m_thermo;
+    pybind11::object m_temperature_callback;
+    //! One-element stand-in for the thermo properties: kinetic energy that gives the set kT
+    GPUArray<Scalar> m_set_temperature_properties;
     std::vector<std::shared_ptr<DyBondBase>> m_DyBonds;
     std::shared_ptr<BondData> m_bond_data;
     std::unordered_map<std::pair<idx, idx>, idx, particle_type_pair_hash> m_typePair_to_dybond;
