@@ -184,6 +184,16 @@ void DyBondBase::setR0(Scalar r0)
     m_gpu_params_dirty = true;
     }
 
+void DyBondBase::setDt(Scalar dt)
+    {
+    if (dt == m_dt)
+        {
+        return;
+        }
+    m_dt = dt;
+    m_gpu_params_dirty = true;
+    }
+
 namespace detail
     {
 void export_DyBondBase(pybind11::module& m)
@@ -204,7 +214,8 @@ void export_DyBondBase(pybind11::module& m)
         .def("getNumBonds", &DyBondBase::getNumBonds)
         .def("setSelfAvoidingFlag", &DyBondBase::setSelfAvoidingFlag)
         .def("setNearestNeighborFlag", &DyBondBase::setNearestNeighborFlag)
-        .def("setR0", &DyBondBase::setR0);
+        .def("setR0", &DyBondBase::setR0)
+        .def("setDt", &DyBondBase::setDt);
     }
     } // namespace detail
 

@@ -41,6 +41,8 @@ class DyBondBase
     void setForceParams(Scalar a);
     void setNearestNeighborFlag(bool flag);
     void setR0(Scalar r0);
+    //! Timestep size used in the per-sweep probabilities kon dt period and koff dt period
+    void setDt(Scalar dt);
     long unsigned int getNumBonds();
     virtual void setGPUStruct() {};
 
