@@ -6,6 +6,7 @@ import hoomd
 from hoomd import operation
 from hoomd.md import _md
 from hoomd.logging import log, Loggable, modify_namespace;
+import weakref
 
 __all__ = ['DyBond', 'DyBondUpdater']
 
@@ -155,10 +156,19 @@ class DyBond(metaclass = Loggable):
         self.nearestNeighbor = nearestNeighbor
 
 class DyBondUpdater(operation.Updater):
-    def __init__(self, trigger: hoomd.trigger.Trigger, nlist, thermo, nearestNeighbor=True):
+    def __init__(self, trigger: hoomd.trigger.Trigger, nlist, thermo, nearestNeighbor=True,
+                 use_set_temperature=False):
         '''
         Creates an instance of the dybond updater.
         NOTE: Not tested for running using multiple GPU's using MPI
+
+        use_set_temperature (bool): False (default) evaluates the temperature switch and the
+            Metropolis factor at the instantaneous translational kinetic temperature from
+            thermo. True uses the kT of the integrator's single Langevin or Brownian method,
+            looked up at every sweep (a Python call per sweep), so assigning method.kT or
+            replacing the method or the integrator takes effect at the next sweep; leaving no
+            such method, or a dt different from the one at attach, raises ValueError at the
+            next sweep.
         '''
         # initialize base class
         if isinstance(trigger, hoomd.trigger.Periodic):
@@ -174,7 +184,62 @@ class DyBondUpdater(operation.Updater):
         self.nlist = nlist
         self.thermo = thermo
         self.nearestNeighbor = nearestNeighbor
+        self._use_set_temperature = bool(use_set_temperature)
         self.specs = {}
+
+    @property
+    def use_set_temperature(self):
+        """True: rates follow the thermostat's set kT; False: the kinetic temperature."""
+        return self._use_set_temperature
+
+    @use_set_temperature.setter
+    def use_set_temperature(self, value):
+        value = bool(value)
+        if hasattr(self, '_cpp_obj') and self._cpp_obj is not None:
+            self._apply_temperature_source(value)   # raises before anything changes
+        self._use_set_temperature = value
+
+    def _apply_temperature_source(self, use_set_temperature):
+        """Give C++ a per-sweep temperature callback (set kT) or none (kinetic temperature).
+
+        use_set_temperature (bool): the source to apply. With True the active integrator must
+        hold exactly one Langevin or Brownian method now and at every later sweep.
+        """
+        if not use_set_temperature:
+            self._cpp_obj.setTemperatureCallback(None)
+            return
+        self._set_temperature(self._simulation.timestep)   # raises before anything changes
+        ref = weakref.ref(self)
+
+        def set_temperature(timestep):
+            """kT for C++ at this sweep; weak reference avoids a C++/Python cycle."""
+            updater = ref()
+            if updater is None:
+                raise RuntimeError("use_set_temperature: the DyBond updater no longer exists")
+            return updater._set_temperature(timestep)
+
+        self._cpp_obj.setTemperatureCallback(set_temperature)
+
+    def _set_temperature(self, timestep):
+        """Return the kT of the active integrator's single Langevin/Brownian method.
+
+        timestep (int): timestep at which the method's kT Variant is evaluated.
+        Looks up sim.operations.integrator and its methods at each call, so replacing either,
+        or assigning method.kT, is followed; any other number of such methods, or a dt other
+        than the one the bond rates were built with at attach, is an error.
+        """
+        integrator = self._simulation.operations.integrator
+        if integrator is not None and integrator.dt != self._attached_dt:
+            raise ValueError("use_set_temperature: integrator dt changed from "
+                             f"{self._attached_dt} at attach to {integrator.dt}; DyBond rates "
+                             "use the dt at attach, so re-attach the updater after a dt change")
+        methods = [] if integrator is None else integrator.methods
+        thermostats = [m for m in methods
+                       if isinstance(m, (hoomd.md.methods.Langevin, hoomd.md.methods.Brownian))]
+        if len(thermostats) != 1:
+            raise ValueError("use_set_temperature needs exactly one Langevin or Brownian "
+                             f"method in the integrator, found {len(thermostats)}")
+        return float(thermostats[0].kT(timestep))
 
     @property
     def dybonds(self):
@@ -248,8 +313,9 @@ class DyBondUpdater(operation.Updater):
                                                 self.trigger,
                                                 self.nlist._cpp_obj, 
                                                 self.thermo._cpp_obj);
+        self._attached_dt = self._simulation.operations.integrator.dt
         for bond in self.dybonds:
-            bond._set_time(period = self.period,dt = self._simulation.operations.integrator.dt,nearestNeighbor=self.nearestNeighbor)
+            bond._set_time(period = self.period,dt = self._attached_dt,nearestNeighbor=self.nearestNeighbor)
             bond._attach(self._simulation)
             self._cpp_obj.addDyBond(bond._cpp_obj)
             for (typeA, typeB) in bond.names:
@@ -260,4 +326,5 @@ class DyBondUpdater(operation.Updater):
                 except Exception:
                     current_rcut = 0.0
                 self.nlist.r_cut[typeA, typeB] = max(float(current_rcut), float(bond.rmax))
+        self._apply_temperature_source(self._use_set_temperature)
         self._cpp_obj.configure()

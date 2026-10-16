@@ -51,8 +51,21 @@ DyBondUpdater::DyBondUpdater(std::shared_ptr<SystemDefinition> sysdef,
     m_bond_data = m_sysdef->getBondData();
     rng = std::mt19937_64(sysdef->getSeed());
     unif = std::uniform_real_distribution<double>(0, 1);
+    m_set_temperature_properties = GPUArray<Scalar>(1, m_exec_conf);
     assert(m_nlist);
     assert(m_thermo);
+    }
+
+/* Rates and the Metropolis factor are evaluated at temp = 2 properties[0] / translational_dof.
+   With a temperature callback set, properties[0] is replaced by the kinetic energy for which
+   that expression equals callback(timestep), so the CPU and GPU bonding code read that
+   temperature unchanged. The Python side supplies a callback that looks up the active
+   integrator's thermostat kT at each call, so every change made outside DyBond takes effect at
+   the next sweep; exceptions it raises propagate to sim.run.
+*/
+void DyBondUpdater::setTemperatureCallback(pybind11::object callback)
+    {
+    m_temperature_callback = callback;
     }
 
 bool min(std::vector<idx> A, std::vector<idx> B)
@@ -164,14 +177,36 @@ void DyBondUpdater::update(uint64_t timestep)
     */
     m_nlist->compute(timestep);
     m_thermo->compute(timestep);
-    Scalar temp = m_thermo->getTranslationalTemperature();
-    if (temp <= 1e-6)
-        {
-        return;
-        }
-
-    const GPUArray<Scalar>& properties = m_thermo->getProperties();
     Scalar translational_dof = m_thermo->getTranslationalDOF();
+    const GPUArray<Scalar>* properties_ptr = &m_thermo->getProperties();
+    if (m_temperature_callback && !m_temperature_callback.is_none())
+        {
+        Scalar temp;
+            {
+            pybind11::gil_scoped_acquire gil;
+            temp = m_temperature_callback(timestep).cast<Scalar>();
+            }
+        if (temp <= 1e-6 || translational_dof <= 0)
+            {
+            return;
+            }
+            {
+            ArrayHandle<Scalar> h_set(m_set_temperature_properties,
+                                      access_location::host,
+                                      access_mode::overwrite);
+            h_set.data[0] = temp * translational_dof / Scalar(2.0);
+            }
+        properties_ptr = &m_set_temperature_properties;
+        }
+    else
+        {
+        Scalar temp = m_thermo->getTranslationalTemperature();
+        if (temp <= 1e-6)
+            {
+            return;
+            }
+        }
+    const GPUArray<Scalar>& properties = *properties_ptr;
 
     std::vector<set<idx>> allBondTagsToBreak(m_DyBonds.size());
     std::vector<std::vector<int4>> allBrokenEvents(m_DyBonds.size());
@@ -410,7 +445,8 @@ void export_DyBondUpdaterGPU(pybind11::module& m)
                             std::shared_ptr<md::NeighborList>,
                             std::shared_ptr<md::ComputeThermo>>())
         .def("addDyBond", &gpu::DyBondUpdater::addDyBond)
-        .def("configure", &gpu::DyBondUpdater::configure);
+        .def("configure", &gpu::DyBondUpdater::configure)
+        .def("setTemperatureCallback", &gpu::DyBondUpdater::setTemperatureCallback);
     }
     } // namespace detail
     } // namespace hoomd
