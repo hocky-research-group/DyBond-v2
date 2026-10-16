@@ -11,6 +11,9 @@ below it. Binding is certain when cold (kon dt period = 1) and impossible when h
 (kon_melt = 0); unbinding is impossible when cold (koff = 0) and certain when hot
 (koff_melt dt period = 1).
 
+In every mode the per-sweep probabilities kon dt period and koff dt period use the dt of the
+active integrator at that sweep, so kon and koff stay rates per unit time when dt changes.
+
 Run inside the HOOMD container:
     pytest test_set_temperature.py -v
 """
@@ -27,6 +30,8 @@ MASS = 1e20
 T_MELT = 1.0
 T_COLD = 0.5
 T_HOT = 2.0
+DT_SHORT = 1e-6
+DT_LONG = 1.0
 
 
 def _devices():
@@ -42,12 +47,13 @@ def _devices():
 DEVICES = [pytest.param(f, id=i) for i, f in _devices()]
 
 
-def _hot_pair_sim(device, set_kT, n_methods=1, method="langevin"):
+def _hot_pair_sim(device, set_kT, n_methods=1, method="langevin", bonded=False):
     """Two frozen particles at r = r0 with kinetic temperature >= 3; thermostat set to set_kT.
 
     device (callable): hoomd device factory. set_kT (float): thermostat kT.
     n_methods (int): number of Langevin methods to add (0, 1, or 2; each on one particle when 2).
     method (str): "langevin", "brownian", or "nve" for the single method's class.
+    bonded (bool): start with a P-P bond between the two particles.
     Returns (sim, langevin_or_None, nlist, thermo, harmonic bond).
     """
     snap = hoomd.Snapshot()
@@ -61,6 +67,10 @@ def _hot_pair_sim(device, set_kT, n_methods=1, method="langevin"):
     snap.particles.velocity[:] = [[0.0, v, 0.0], [0.0, -v, 0.0]]
     snap.configuration.box = [20.0, 20.0, 20.0, 0, 0, 0]
     snap.bonds.types = ["P-P"]
+    if bonded:
+        snap.bonds.N = 1
+        snap.bonds.typeid[:] = [0]
+        snap.bonds.group[:] = [[0, 1]]
     sim = hoomd.Simulation(device=device(), seed=11)
     sim.create_state_from_snapshot(snap)
     sim.operations.tuners.clear()
@@ -239,16 +249,70 @@ def test_replaced_integrator_thermostat_is_used_next_sweep(device):
     assert _num_bonds(sim) == 0
 
 
+def _rate_updater(nlist, thermo, harm, kon, koff, **kwargs):
+    """DyBond updater for P-P with constant rates (no temperature switch), sweeping every step.
+
+    nlist, thermo, harm: simulation objects from _hot_pair_sim. kon, koff (float): binding and
+    unbinding rates per unit time. kwargs: passed to the updater.
+    """
+    upd = DyBondUpdater(hoomd.trigger.Periodic(1), nlist, thermo, **kwargs)
+    upd[("P", "P")] = dict(bond=harm, bond_typename="P-P", kon=kon, koff=koff,
+                           rmin=0.5, rmax=1.3, r0=1.0, metropolisFlag=True,
+                           selfAvoidFlag=False)
+    return upd
+
+
 @pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("use_set_temperature", [False, True], ids=["kinetic", "set_kT"])
 @pytest.mark.parametrize("how", ["replace", "in_place"])
-def test_timestep_change_after_attach_raises(device, how):
-    """DyBond rates use the dt seen at attach: a later dt change fails instead of mixing."""
-    sim, _, nlist, thermo, harm = _hot_pair_sim(device, set_kT=T_COLD)
-    sim.operations.updaters.append(_updater(nlist, thermo, harm, use_set_temperature=True))
-    sim.run(2)
+@pytest.mark.parametrize("event", ["bind", "unbind"])
+def test_rates_follow_integrator_dt_after_attach(device, use_set_temperature, how, event):
+    """kon and koff are rates per unit time: each sweep uses the active integrator's dt.
+
+    Attached at DT_SHORT, the rate 1 / DT_LONG gives a per-sweep probability of 1e-6, so the
+    state holds; once dt becomes DT_LONG, by assignment or a new integrator, the probability is
+    1 and the bond forms (or breaks) at the next sweep.
+    """
+    bonded = event == "unbind"
+    sim, _, nlist, thermo, harm = _hot_pair_sim(device, set_kT=T_COLD, bonded=bonded)
+    sim.operations.integrator.dt = DT_SHORT
+    kon, koff = (0.0, 1.0 / DT_LONG) if bonded else (1.0 / DT_LONG, 0.0)
+    sim.operations.updaters.append(_rate_updater(nlist, thermo, harm, kon, koff,
+                                                 use_set_temperature=use_set_temperature))
+    sim.run(3)
+    assert _num_bonds(sim) == int(bonded)
     if how == "replace":
-        sim.operations.integrator = _replacement_integrator(T_COLD, nlist, dt=2 * DT)
+        sim.operations.integrator = _replacement_integrator(T_COLD, nlist, dt=DT_LONG)
     else:
-        sim.operations.integrator.dt = 2 * DT
-    with pytest.raises(ValueError, match="dt"):
-        sim.run(2)
+        sim.operations.integrator.dt = DT_LONG
+    sim.run(1)
+    assert _num_bonds(sim) == int(not bonded)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("missing", ["thermostat", "integrator"])
+def test_failed_attach_can_be_fixed_and_rerun(device, missing):
+    """A configuration error at attach leaves nothing attached: fixing it and rerunning works.
+
+    HOOMD treats an operation whose C++ object exists as attached and does not rerun its attach
+    hook, so the checks must raise before any C++ object is built. Missing thermostat: flag on
+    with no Langevin method. Missing integrator: no integrator at all. After the fix, binding is
+    certain (cold set kT, or kon dt period = 1).
+    """
+    n_methods = 0 if missing == "thermostat" else 1
+    sim, _, nlist, thermo, harm = _hot_pair_sim(device, set_kT=T_COLD, n_methods=n_methods)
+    integ = sim.operations.integrator
+    if missing == "thermostat":
+        upd = _updater(nlist, thermo, harm, use_set_temperature=True)
+    else:
+        sim.operations.integrator = None
+        upd = _rate_updater(nlist, thermo, harm, kon=1.0 / DT, koff=0.0)
+    sim.operations.updaters.append(upd)
+    with pytest.raises(ValueError):
+        sim.run(1)
+    if missing == "thermostat":
+        integ.methods.append(hoomd.md.methods.Langevin(filter=hoomd.filter.All(), kT=T_COLD))
+    else:
+        sim.operations.integrator = integ
+    sim.run(3)
+    assert _num_bonds(sim) == 1

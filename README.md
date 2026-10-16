@@ -9,9 +9,9 @@ Dynamic Bonding plugin for **HOOMD-blue v7**. This repository contains updates t
 **DyBond** enables molecular dynamics simulations in HOOMD-blue where chemical or physical bonds form and break dynamically. Bonding decisions are made during the simulation run using distance thresholds and Metropolis Monte Carlo criteria, allowing the simulation of reversible polymer networks, self-assembling systems, supramolecular chemistry, and more.
 
 ### Key Features
-- **Dynamic Bond Formation & Cleavage**: Define bond-forming and bond-breaking rates ($k_{\text{on}}$, $k_{\text{off}}$) and range limitations ($r_{\text{min}}$, $r_{\text{max}}$).
+- **Dynamic Bond Formation & Cleavage**: Define bond-forming and bond-breaking rates ($k_{\text{on}}$, $k_{\text{off}}$) and range limitations ($r_{\text{min}}$, $r_{\text{max}}$). The rates are per unit time: each sweep converts them to probabilities $k\,\Delta t\,n_{\text{period}}$ with the `dt` of the active `sim.operations.integrator`, looked up at every sweep (one Python call per sweep), so assigning `integrator.dt` or replacing the integrator takes effect at the next sweep.
 - **Self-Avoidance**: `selfAvoidFlag` (required boolean parameter) specifies whether to exclude candidate partners belonging to the same molecule, where molecules are traced from the *static* bond topology when the updater is configured. Set it to `False` to permit intramolecular bonding, which is how loop defects form in a network of multi-arm building blocks, or `True` to enforce intermolecular-only bonding. The flag is honored identically by the CPU and GPU candidate searches.
-- **Temperature Source**: `DyBondUpdater(..., use_set_temperature=False)`. By default the temperature switch and the Metropolis factor use the instantaneous translational kinetic temperature from the `thermo` compute. With `use_set_temperature=True` they use the `kT` of the integrator's single Langevin or Brownian method, looked up at every sweep (one Python call per sweep), so assigning `method.kT` (a new value or Variant), replacing the method, or replacing `sim.operations.integrator` takes effect at the next sweep; leaving no such method raises `ValueError`, as does an integrator `dt` different from the one at attach (the rate probabilities are built with the attach-time `dt`).
+- **Temperature Source**: `DyBondUpdater(..., use_set_temperature=False)`. By default the temperature switch and the Metropolis factor use the instantaneous translational kinetic temperature from the `thermo` compute. With `use_set_temperature=True` they use the `kT` of the integrator's single Langevin or Brownian method, looked up at every sweep (one Python call per sweep), so assigning `method.kT` (a new value or Variant), replacing the method, or replacing `sim.operations.integrator` takes effect at the next sweep; leaving no such method raises `ValueError`.
 - **HOOMD-blue 7 Compatibility**: Full compatibility with the `hoomd.Simulation` workflow, triggers, and operations API.
 - **GPU Acceleration**: Native GPU-accelerated bonding checks and event compaction built using CUDA/HIP.
 
@@ -134,7 +134,14 @@ DyBond/
   temperature. Python `DyBondUpdater` gained `use_set_temperature` (default `False`; settable
   after attach, validated before it changes anything); its callback (held through a weak
   reference) evaluates the kT of the active `sim.operations.integrator`'s single
-  Langevin/Brownian method, raising `ValueError` for any other count or when the integrator
-  `dt` differs from the attach-time `dt` used in the rate probabilities. Tests in `tests/test_set_temperature.py`. Motivation: the kinetic
+  Langevin/Brownian method, raising `ValueError` for any other count. Tests in `tests/test_set_temperature.py`.
+  `DyBondBase` gained `setDt(dt)` (marks the GPU parameters dirty) and `DyBondUpdater` (C++)
+  `setDtCallback(callable)`; Python installs a callback returning the active integrator's
+  `dt`, called every sweep in every mode, so the probabilities `kon dt period` and
+  `koff dt period` follow a `dt` change or an integrator replacement after attach.
+  `DyBondUpdater._attach_hook` checks the integrator and, with the flag on, the thermostat
+  before building any C++ object, raising a `ValueError` that is also a HOOMD
+  `SimulationDefinitionError`, so HOOMD undoes the attach and a corrected simulation re-attaches
+  on the next `run`. Motivation: the kinetic
   temperature of a few-thousand-particle system fluctuates by ~1 % (sqrt(2/(3N))), which a steep
   switch turns into large rate fluctuations shared by every bond.

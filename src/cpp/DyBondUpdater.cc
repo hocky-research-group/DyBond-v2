@@ -68,6 +68,16 @@ void DyBondUpdater::setTemperatureCallback(pybind11::object callback)
     m_temperature_callback = callback;
     }
 
+/* The per-sweep probabilities kon dt period and koff dt period need the integrator's dt, which
+   the updater cannot reach from C++. The Python side supplies a callback that returns the dt of
+   the active integrator, so assigning integrator.dt or replacing the integrator takes effect at
+   the next sweep; exceptions it raises propagate to sim.run.
+*/
+void DyBondUpdater::setDtCallback(pybind11::object callback)
+    {
+    m_dt_callback = callback;
+    }
+
 bool min(std::vector<idx> A, std::vector<idx> B)
     {
     auto a = std::min_element(A.begin(), A.end());
@@ -175,6 +185,18 @@ void DyBondUpdater::update(uint64_t timestep)
             }
         }
     */
+    if (m_dt_callback && !m_dt_callback.is_none())
+        {
+        Scalar dt;
+            {
+            pybind11::gil_scoped_acquire gil;
+            dt = m_dt_callback().cast<Scalar>();
+            }
+        for (const auto& dybond : m_DyBonds)
+            {
+            dybond->setDt(dt);
+            }
+        }
     m_nlist->compute(timestep);
     m_thermo->compute(timestep);
     Scalar translational_dof = m_thermo->getTranslationalDOF();
@@ -446,7 +468,8 @@ void export_DyBondUpdaterGPU(pybind11::module& m)
                             std::shared_ptr<md::ComputeThermo>>())
         .def("addDyBond", &gpu::DyBondUpdater::addDyBond)
         .def("configure", &gpu::DyBondUpdater::configure)
-        .def("setTemperatureCallback", &gpu::DyBondUpdater::setTemperatureCallback);
+        .def("setTemperatureCallback", &gpu::DyBondUpdater::setTemperatureCallback)
+        .def("setDtCallback", &gpu::DyBondUpdater::setDtCallback);
     }
     } // namespace detail
     } // namespace hoomd

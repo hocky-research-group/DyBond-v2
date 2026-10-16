@@ -10,6 +10,14 @@ import weakref
 
 __all__ = ['DyBond', 'DyBondUpdater']
 
+
+class _AttachError(hoomd.error.SimulationDefinitionError, ValueError):
+    """Configuration error at attach: a ValueError that HOOMD's _attach rolls back.
+
+    HOOMD undoes an operation's attach bookkeeping only for SimulationDefinitionError, so a
+    corrected simulation can attach the updater again on the next run.
+    """
+
 class DyBond(metaclass = Loggable):
     def __init__(self,name,bond,kon,koff,rmin,rmax,nameA,nameB,selfAvoidFlag,
                  metropolisFlag = True,forceFlag = False):
@@ -162,13 +170,16 @@ class DyBondUpdater(operation.Updater):
         Creates an instance of the dybond updater.
         NOTE: Not tested for running using multiple GPU's using MPI
 
+        kon and koff are rates per unit time. Each sweep turns them into probabilities with the
+        dt of the active integrator, looked up at every sweep (a Python call per sweep), so
+        assigning integrator.dt or replacing the integrator takes effect at the next sweep.
+
         use_set_temperature (bool): False (default) evaluates the temperature switch and the
             Metropolis factor at the instantaneous translational kinetic temperature from
             thermo. True uses the kT of the integrator's single Langevin or Brownian method,
             looked up at every sweep (a Python call per sweep), so assigning method.kT or
             replacing the method or the integrator takes effect at the next sweep; leaving no
-            such method, or a dt different from the one at attach, raises ValueError at the
-            next sweep.
+            such method raises ValueError at the next sweep.
         '''
         # initialize base class
         if isinstance(trigger, hoomd.trigger.Periodic):
@@ -225,14 +236,9 @@ class DyBondUpdater(operation.Updater):
 
         timestep (int): timestep at which the method's kT Variant is evaluated.
         Looks up sim.operations.integrator and its methods at each call, so replacing either,
-        or assigning method.kT, is followed; any other number of such methods, or a dt other
-        than the one the bond rates were built with at attach, is an error.
+        or assigning method.kT, is followed; any other number of such methods is an error.
         """
         integrator = self._simulation.operations.integrator
-        if integrator is not None and integrator.dt != self._attached_dt:
-            raise ValueError("use_set_temperature: integrator dt changed from "
-                             f"{self._attached_dt} at attach to {integrator.dt}; DyBond rates "
-                             "use the dt at attach, so re-attach the updater after a dt change")
         methods = [] if integrator is None else integrator.methods
         thermostats = [m for m in methods
                        if isinstance(m, (hoomd.md.methods.Langevin, hoomd.md.methods.Brownian))]
@@ -240,6 +246,31 @@ class DyBondUpdater(operation.Updater):
             raise ValueError("use_set_temperature needs exactly one Langevin or Brownian "
                              f"method in the integrator, found {len(thermostats)}")
         return float(thermostats[0].kT(timestep))
+
+    def _integrator_dt(self):
+        """Return the dt of the active integrator, looked up at each call.
+
+        Replacing sim.operations.integrator or assigning its dt is followed; no integrator is
+        an error.
+        """
+        integrator = self._simulation.operations.integrator
+        if integrator is None:
+            raise ValueError("DyBond rates need the integrator's dt, but the simulation has "
+                             "no integrator")
+        return float(integrator.dt)
+
+    def _apply_dt_source(self):
+        """Give C++ a per-sweep callback that returns the active integrator's dt."""
+        ref = weakref.ref(self)
+
+        def integrator_dt():
+            """dt for C++ at this sweep; weak reference avoids a C++/Python cycle."""
+            updater = ref()
+            if updater is None:
+                raise RuntimeError("DyBond: the DyBond updater no longer exists")
+            return updater._integrator_dt()
+
+        self._cpp_obj.setDtCallback(integrator_dt)
 
     @property
     def dybonds(self):
@@ -298,6 +329,14 @@ class DyBondUpdater(operation.Updater):
             self.specs[(a, b)] = spec
 
     def _attach_hook(self):
+        # validate before any C++ object or dependency attaches: HOOMD treats an operation with
+        # a C++ object as attached and does not rerun this hook
+        try:
+            dt = self._integrator_dt()
+            if self._use_set_temperature:
+                self._set_temperature(self._simulation.timestep)
+        except ValueError as err:
+            raise _AttachError(str(err)) from err
         # initialize the reflected c++ class
         self.nlist._attach(self._simulation)
         self.thermo._attach(self._simulation)
@@ -313,9 +352,8 @@ class DyBondUpdater(operation.Updater):
                                                 self.trigger,
                                                 self.nlist._cpp_obj, 
                                                 self.thermo._cpp_obj);
-        self._attached_dt = self._simulation.operations.integrator.dt
         for bond in self.dybonds:
-            bond._set_time(period = self.period,dt = self._attached_dt,nearestNeighbor=self.nearestNeighbor)
+            bond._set_time(period = self.period,dt = dt,nearestNeighbor=self.nearestNeighbor)
             bond._attach(self._simulation)
             self._cpp_obj.addDyBond(bond._cpp_obj)
             for (typeA, typeB) in bond.names:
@@ -327,4 +365,5 @@ class DyBondUpdater(operation.Updater):
                     current_rcut = 0.0
                 self.nlist.r_cut[typeA, typeB] = max(float(current_rcut), float(bond.rmax))
         self._apply_temperature_source(self._use_set_temperature)
+        self._apply_dt_source()
         self._cpp_obj.configure()
